@@ -24,37 +24,46 @@ async function getUserFromRequest(req) {
 
 // Funcție pentru generarea PDF-ului
 async function generatePDF(job) {
-  // Pentru Vercel, folosim chrome-aws-lambda și puppeteer-core
-  // fără plugin-ul stealth care cauzează probleme
+  // Folosim chrome-aws-lambda și puppeteer-core direct
+  // Aceste pachete sunt mai bine optimizate pentru serverless environments
   const chromium = require('chrome-aws-lambda');
   const puppeteer = require('puppeteer-core');
   
   let browser;
   try {
-    console.log('Launching browser...');
+    console.log('Starting browser with enhanced settings...');
+    
+    // Opțiuni optimizate pentru Vercel cu alocări mai mari de resurse
     browser = await puppeteer.launch({
       args: [
         ...chromium.args,
         '--disable-features=site-per-process',
         '--disable-dev-shm-usage',
         '--disable-setuid-sandbox',
-        '--no-sandbox'
+        '--no-sandbox',
+        '--font-render-hinting=none',
+        '--disable-gpu',
+        '--no-first-run',
+        '--single-process',
+        '--no-zygote'
       ],
-      defaultViewport: chromium.defaultViewport,
+      defaultViewport: {
+        width: job.options?.pageWidth || 1200,
+        height: job.options?.pageHeight || 1600
+      },
       executablePath: await chromium.executablePath,
       headless: true,
+      ignoreHTTPSErrors: true
     });
 
-    console.log('Browser launched successfully');
-
+    console.log('Browser started successfully');
+    
     // Creăm o pagină nouă
     const page = await browser.newPage();
     
-    // Setăm viewport-ul în funcție de opțiunile job-ului
-    await page.setViewport({ 
-      width: job.options?.pageWidth || 1200, 
-      height: job.options?.pageHeight || 1600 
-    });
+    // Optimizări pentru performanță și memorie
+    await page.setCacheEnabled(true);
+    await page.setBypassCSP(true);
     
     // Setăm agent-ul de utilizator pentru compatibilitate mai bună
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
@@ -64,6 +73,7 @@ async function generatePDF(job) {
       <!DOCTYPE html>
       <html>
       <head>
+        <meta charset="UTF-8">
         <title>${job.name || 'Combined PDF'}</title>
         <style>
           body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
@@ -85,60 +95,91 @@ async function generatePDF(job) {
         </div>
     `;
 
-    // Procesăm fiecare URL din job
+    // Procesăm fiecare URL individual pentru a evita memoria excesivă
+    console.log(`Processing ${job.urls.length} URLs...`);
     for (let i = 0; i < job.urls.length; i++) {
       const url = job.urls[i];
       
       try {
         console.log(`Processing URL ${i+1}/${job.urls.length}: ${url}`);
         
-        // Navigăm la URL cu un timeout mai mare
-        await page.goto(url, { 
-          waitUntil: 'networkidle2', // Schimbat la networkidle2 pentru a fi mai permisiv
-          timeout: 45000  // 45 seconds to accommodate slower sites
+        // Folosim o abordare mai robustă pentru a naviga la URL
+        const timeout = 30000; // 30 secunde timeout
+        const navigationPromise = page.goto(url, { 
+          waitUntil: 'networkidle2', // Mai puțin strict decât networkidle0
+          timeout 
         });
+        
+        // Timeout manual pentru a evita blocarea completă
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error(`Navigation timeout ${timeout}ms exceeded`)), timeout + 5000)
+        );
+        
+        // Așteptăm oricare dintre promisiuni să se rezolve
+        await Promise.race([navigationPromise, timeoutPromise]);
         
         // Executăm script pentru a expanda elementele de tip acordeon
         if (job.options?.expandAccordions) {
           await page.evaluate(() => {
-            // Încercăm să găsim și să deschidem diverse tipuri de acordeoane
-            
-            // Bootstrap accordions
-            document.querySelectorAll('.accordion-button.collapsed').forEach(button => {
-              try { button.click(); } catch (e) {}
-            });
-            
-            // Generic accordions by attribute
-            document.querySelectorAll('[aria-expanded="false"]').forEach(elem => {
-              try { elem.click(); } catch (e) {}
-            });
-            
-            // Generic accordions by class
-            ['accordion', 'collapse', 'dropdown'].forEach(className => {
-              document.querySelectorAll(`.${className}`).forEach(acc => {
-                if (acc.classList.contains('collapsed') || acc.classList.contains('closed') || 
-                    !acc.classList.contains('active') || !acc.classList.contains('show')) {
-                  try { acc.click(); } catch (e) {}
-                }
+            try {
+              // Încercăm să găsim și să deschidem diverse tipuri de acordeoane
+              
+              // Bootstrap accordions
+              document.querySelectorAll('.accordion-button.collapsed').forEach(button => {
+                try { button.click(); } catch (e) {}
               });
-            });
+              
+              // Generic accordions by attribute
+              document.querySelectorAll('[aria-expanded="false"]').forEach(elem => {
+                try { elem.click(); } catch (e) {}
+              });
+              
+              // Generic accordions by class
+              ['accordion', 'collapse', 'dropdown'].forEach(className => {
+                document.querySelectorAll(`.${className}`).forEach(acc => {
+                  if (acc.classList.contains('collapsed') || acc.classList.contains('closed') || 
+                      !acc.classList.contains('active') || !acc.classList.contains('show')) {
+                    try { acc.click(); } catch (e) {}
+                  }
+                });
+              });
+            } catch (e) {
+              console.error('Error in accordion expansion:', e);
+            }
             
             // Așteptăm pentru animații
             return new Promise(resolve => setTimeout(resolve, 1000));
           });
           
-          // Așteptăm ca toate resursele să se încarce după expandare
-          await page.waitForTimeout(1500);
+          // Așteptăm puțin după expandare
+          await page.waitForTimeout(1000);
         }
         
         // Obținem conținutul HTML al paginii
         const pageContent = await page.evaluate(() => {
-          // Curățăm conținutul de elemente nedorite
-          document.querySelectorAll('script, style, iframe[src*="ads"], div[id*="ad-"], div[class*="ad-"]')
-            .forEach(el => { try { el.remove(); } catch (e) {} });
-          
-          // Returnăm conținutul body
-          return document.documentElement.outerHTML;
+          try {
+            // Curățăm conținutul de elemente nedorite pentru a reduce dimensiunea
+            document.querySelectorAll('script, iframe[src*="ads"], div[id*="ad-"], div[class*="ad-"]').forEach(el => {
+              try { el.remove(); } catch (e) {}
+            });
+            
+            // Optimizăm stilurile inline pentru a reduce dimensiunea
+            document.querySelectorAll('style').forEach(style => {
+              try {
+                const text = style.textContent;
+                // Păstrăm doar stilurile esențiale și eliminăm comentariile
+                style.textContent = text
+                  .replace(/\/\*[\s\S]*?\*\//g, '')  // Remove comments
+                  .replace(/\s+/g, ' ')              // Collapse whitespace
+                  .trim();
+              } catch (e) {}
+            });
+            
+            // Returnăm doar conținutul body pentru a reduce memoria
+            return document.documentElement.outerHTML;
+          } catch (e) {
+            return `<div class="error">Error processing page content: ${e.message}</div>`;
+          }
         });
         
         // Adăugăm conținutul la HTML-ul combinat
@@ -150,6 +191,12 @@ async function generatePDF(job) {
             </div>
           </div>
         `;
+        
+        // Colectăm gunoiul și eliberăm memoria după fiecare pagină
+        if (global.gc) {
+          global.gc();
+        }
+        
       } catch (error) {
         console.error(`Error processing URL ${url}:`, error);
         // În caz de eroare, adăugăm un mesaj de eroare
@@ -167,8 +214,11 @@ async function generatePDF(job) {
     combinedHTML += `</body></html>`;
     
     console.log('Setting content for final PDF...');
-    // Setăm conținutul HTML combinat
-    await page.setContent(combinedHTML, { waitUntil: 'networkidle2' });
+    // Setăm conținutul HTML combinat și folosim un timeout extins
+    await page.setContent(combinedHTML, { 
+      waitUntil: 'networkidle2',
+      timeout: 30000
+    });
     
     console.log('Generating PDF...');
     // Generăm PDF-ul final
@@ -181,7 +231,9 @@ async function generatePDF(job) {
         right: '20px',
         bottom: '20px',
         left: '20px'
-      }
+      },
+      // Opțiuni optimizate pentru Vercel
+      preferCSSPageSize: true
     });
     
     console.log('PDF generated successfully');
@@ -190,7 +242,11 @@ async function generatePDF(job) {
   } catch (error) {
     console.error('Error in PDF generation:', error);
     if (browser) {
-      await browser.close();
+      try {
+        await browser.close();
+      } catch (e) {
+        console.error('Error closing browser:', e);
+      }
     }
     throw error;
   }
@@ -261,7 +317,7 @@ module.exports = async (req, res) => {
     res.setHeader('Content-Length', pdfBuffer.length);
     
     // Trimitem PDF-ul ca răspuns
-    res.status(200).send(pdfBuffer);
+    res.send(pdfBuffer);
     
   } catch (error) {
     console.error('PDF generation error:', error);
