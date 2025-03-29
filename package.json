@@ -3,12 +3,11 @@
   "version": "1.0.0",
   "description": "Web to PDF converter with user authentication and MongoDB",
   "scripts": {
-    "start": "vercel dev",
-    "vercel-build": "bash ./vercel-build.sh"
+    "start": "vercel dev"
   },
   "dependencies": {
-    "auth0": "^4.21.0",
-    "cookie": "^1.0.2",
+    "auth0": "^2.41.0",
+    "cookie": "^0.5.0",
     "jsonwebtoken": "^9.0.0",
     "mongodb": "^4.13.0"
   },
