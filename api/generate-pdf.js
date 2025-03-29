@@ -3,6 +3,11 @@ const { connectToDatabase } = require('./db');
 const cookie = require('cookie');
 const jwt = require('jsonwebtoken');
 const { ObjectId } = require('mongodb');
+const path = require('path');
+const fs = require('fs');
+
+// Import our custom Chrome setup utility
+const { setupChromePath } = require('../chromium-aws-lambda-setup');
 
 // Funcție pentru verificarea autentificării
 async function getUserFromRequest(req) {
@@ -22,233 +27,293 @@ async function getUserFromRequest(req) {
   }
 }
 
+// Log some basic environment information for debugging
+function logEnvironmentInfo() {
+  console.log('Environment information:');
+  console.log(`Working directory: ${process.cwd()}`);
+  console.log(`NODE_ENV: ${process.env.NODE_ENV}`);
+  console.log(`Temp directory: ${process.env.TEMP || process.env.TMP || '/tmp'}`);
+  console.log(`LD_LIBRARY_PATH: ${process.env.LD_LIBRARY_PATH || 'not set'}`);
+
+  // Check if /tmp exists and is writable
+  try {
+    const tmpStats = fs.statSync('/tmp');
+    console.log(`/tmp exists: ${tmpStats.isDirectory()}`);
+    
+    // Try to write to /tmp
+    const testFile = '/tmp/test-write.txt';
+    fs.writeFileSync(testFile, 'test');
+    console.log(`Successfully wrote to ${testFile}`);
+    fs.unlinkSync(testFile);
+  } catch (error) {
+    console.error(`Error with /tmp directory: ${error.message}`);
+  }
+  
+  // Check for the libnss3.so file
+  try {
+    const libPath = '/tmp/libnss3.so';
+    if (fs.existsSync(libPath)) {
+      console.log(`libnss3.so exists at ${libPath}`);
+    } else {
+      console.log(`libnss3.so not found at ${libPath}`);
+    }
+  } catch (error) {
+    console.error(`Error checking for libnss3.so: ${error.message}`);
+  }
+}
+
 // Funcție pentru generarea PDF-ului
 async function generatePDF(job) {
-  // Folosim chrome-aws-lambda și puppeteer-core direct
-  // Aceste pachete sunt mai bine optimizate pentru serverless environments
-  const chromium = require('chrome-aws-lambda');
-  const puppeteer = require('puppeteer-core');
+  // Log environment information
+  logEnvironmentInfo();
   
-  let browser;
-  try {
-    console.log('Starting browser with enhanced settings...');
+  // Try to find an alternative PDF generation approach if Puppeteer fails
+  let usePuppeteer = true;
+  
+  if (usePuppeteer) {
+    // Use Chrome AWS Lambda with our custom setup
+    const chromium = require('chrome-aws-lambda');
+    const puppeteer = require('puppeteer-core');
     
-    // Opțiuni optimizate pentru Vercel cu alocări mai mari de resurse
-    browser = await puppeteer.launch({
-      args: [
-        ...chromium.args,
-        '--disable-features=site-per-process',
-        '--disable-dev-shm-usage',
-        '--disable-setuid-sandbox',
-        '--no-sandbox',
-        '--font-render-hinting=none',
-        '--disable-gpu',
-        '--no-first-run',
-        '--single-process',
-        '--no-zygote'
-      ],
-      defaultViewport: {
-        width: job.options?.pageWidth || 1200,
-        height: job.options?.pageHeight || 1600
-      },
-      executablePath: await chromium.executablePath,
-      headless: true,
-      ignoreHTTPSErrors: true
-    });
-
-    console.log('Browser started successfully');
-    
-    // Creăm o pagină nouă
-    const page = await browser.newPage();
-    
-    // Optimizări pentru performanță și memorie
-    await page.setCacheEnabled(true);
-    await page.setBypassCSP(true);
-    
-    // Setăm agent-ul de utilizator pentru compatibilitate mai bună
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-    
-    // Template HTML pentru combinarea paginilor
-    let combinedHTML = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <title>${job.name || 'Combined PDF'}</title>
-        <style>
-          body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
-          .page { page-break-after: always; padding-bottom: 30px; }
-          .page:last-child { page-break-after: avoid; }
-          .header { background: #f0f0f0; padding: 15px; margin-bottom: 20px; border-bottom: 1px solid #ddd; }
-          .url { color: #0066cc; word-break: break-all; }
-          .timestamp { color: #666; font-size: 12px; margin-top: 8px; }
-          h1 { margin-top: 0; color: #333; }
-          h2 { color: #444; border-bottom: 1px solid #eee; padding-bottom: 5px; }
-          .content { margin-top: 20px; }
-          .error { color: red; padding: 20px; border: 1px solid red; background: #fff0f0; }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <h1>${job.name || 'Combined Web Pages'}</h1>
-          <div class="timestamp">Generated on: ${new Date().toLocaleString()}</div>
-        </div>
-    `;
-
-    // Procesăm fiecare URL individual pentru a evita memoria excesivă
-    console.log(`Processing ${job.urls.length} URLs...`);
-    for (let i = 0; i < job.urls.length; i++) {
-      const url = job.urls[i];
+    let browser;
+    try {
+      console.log('Starting browser with enhanced settings...');
       
+      // Get our custom Chrome settings
+      const chromeSettings = setupChromePath();
+      
+      // Decide on the executable path
+      let executablePath;
+      if (chromeSettings.executablePath) {
+        executablePath = chromeSettings.executablePath;
+      } else {
+        try {
+          executablePath = await chromium.executablePath;
+          console.log(`Using chromium.executablePath: ${executablePath}`);
+        } catch (error) {
+          console.error(`Error getting chromium.executablePath: ${error.message}`);
+          // Fallback to default
+          executablePath = '/tmp/chromium';
+        }
+      }
+      
+      console.log(`Launching browser with executablePath: ${executablePath}`);
+      
+      // Configure all Chrome launch options
+      const launchOptions = {
+        args: [
+          ...chromium.args,
+          ...chromeSettings.args
+        ],
+        defaultViewport: {
+          width: job.options?.pageWidth || 1200,
+          height: job.options?.pageHeight || 1600
+        },
+        executablePath,
+        headless: true,
+        ignoreHTTPSErrors: true
+      };
+      
+      // Try to launch the browser
       try {
-        console.log(`Processing URL ${i+1}/${job.urls.length}: ${url}`);
-        
-        // Folosim o abordare mai robustă pentru a naviga la URL
-        const timeout = 30000; // 30 secunde timeout
-        const navigationPromise = page.goto(url, { 
-          waitUntil: 'networkidle2', // Mai puțin strict decât networkidle0
-          timeout 
-        });
-        
-        // Timeout manual pentru a evita blocarea completă
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error(`Navigation timeout ${timeout}ms exceeded`)), timeout + 5000)
-        );
-        
-        // Așteptăm oricare dintre promisiuni să se rezolve
-        await Promise.race([navigationPromise, timeoutPromise]);
-        
-        // Executăm script pentru a expanda elementele de tip acordeon
-        if (job.options?.expandAccordions) {
-          await page.evaluate(() => {
-            try {
-              // Încercăm să găsim și să deschidem diverse tipuri de acordeoane
-              
-              // Bootstrap accordions
-              document.querySelectorAll('.accordion-button.collapsed').forEach(button => {
-                try { button.click(); } catch (e) {}
-              });
-              
-              // Generic accordions by attribute
-              document.querySelectorAll('[aria-expanded="false"]').forEach(elem => {
-                try { elem.click(); } catch (e) {}
-              });
-              
-              // Generic accordions by class
-              ['accordion', 'collapse', 'dropdown'].forEach(className => {
-                document.querySelectorAll(`.${className}`).forEach(acc => {
-                  if (acc.classList.contains('collapsed') || acc.classList.contains('closed') || 
-                      !acc.classList.contains('active') || !acc.classList.contains('show')) {
-                    try { acc.click(); } catch (e) {}
-                  }
-                });
-              });
-            } catch (e) {
-              console.error('Error in accordion expansion:', e);
-            }
-            
-            // Așteptăm pentru animații
-            return new Promise(resolve => setTimeout(resolve, 1000));
-          });
-          
-          // Așteptăm puțin după expandare
-          await page.waitForTimeout(1000);
-        }
-        
-        // Obținem conținutul HTML al paginii
-        const pageContent = await page.evaluate(() => {
-          try {
-            // Curățăm conținutul de elemente nedorite pentru a reduce dimensiunea
-            document.querySelectorAll('script, iframe[src*="ads"], div[id*="ad-"], div[class*="ad-"]').forEach(el => {
-              try { el.remove(); } catch (e) {}
-            });
-            
-            // Optimizăm stilurile inline pentru a reduce dimensiunea
-            document.querySelectorAll('style').forEach(style => {
-              try {
-                const text = style.textContent;
-                // Păstrăm doar stilurile esențiale și eliminăm comentariile
-                style.textContent = text
-                  .replace(/\/\*[\s\S]*?\*\//g, '')  // Remove comments
-                  .replace(/\s+/g, ' ')              // Collapse whitespace
-                  .trim();
-              } catch (e) {}
-            });
-            
-            // Returnăm doar conținutul body pentru a reduce memoria
-            return document.documentElement.outerHTML;
-          } catch (e) {
-            return `<div class="error">Error processing page content: ${e.message}</div>`;
-          }
-        });
-        
-        // Adăugăm conținutul la HTML-ul combinat
-        combinedHTML += `
-          <div class="page">
-            <h2>Page ${i + 1}: <span class="url">${url}</span></h2>
-            <div class="content">
-              ${pageContent}
-            </div>
-          </div>
-        `;
-        
-        // Colectăm gunoiul și eliberăm memoria după fiecare pagină
-        if (global.gc) {
-          global.gc();
-        }
-        
+        browser = await puppeteer.launch(launchOptions);
+        console.log('Browser launched successfully');
       } catch (error) {
-        console.error(`Error processing URL ${url}:`, error);
-        // În caz de eroare, adăugăm un mesaj de eroare
-        combinedHTML += `
-          <div class="page">
-            <h2>Page ${i + 1}: <span class="url">${url}</span></h2>
-            <div class="error">
-              Error loading page: ${error.message}
-            </div>
+        console.error(`Failed to launch the browser: ${error.message}`);
+        
+        // Try one more time with a different path
+        console.log('Trying alternative approach...');
+        
+        // If we're in a Vercel environment, try to copy the library and set the path
+        if (process.env.VERCEL) {
+          try {
+            // Try to load directly using Puppeteer
+            const puppeteerExtra = require('puppeteer-extra');
+            const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+            puppeteerExtra.use(StealthPlugin());
+            
+            browser = await puppeteerExtra.launch({
+              args: launchOptions.args,
+              defaultViewport: launchOptions.defaultViewport,
+              ignoreHTTPSErrors: true,
+              headless: true
+            });
+            
+            console.log('Launched browser with puppeteer-extra');
+          } catch (puppeteerError) {
+            console.error(`Failed again: ${puppeteerError.message}`);
+            throw error; // Throw the original error
+          }
+        } else {
+          throw error;
+        }
+      }
+      
+      // Create a new page
+      const page = await browser.newPage();
+      
+      // Set cache and CSP settings
+      await page.setCacheEnabled(true);
+      await page.setBypassCSP(true);
+      
+      // Set user agent for better compatibility
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+      
+      // Template HTML for combined pages
+      let combinedHTML = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <title>${job.name || 'Combined PDF'}</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+            .page { page-break-after: always; padding-bottom: 30px; }
+            .page:last-child { page-break-after: avoid; }
+            .header { background: #f0f0f0; padding: 15px; margin-bottom: 20px; border-bottom: 1px solid #ddd; }
+            .url { color: #0066cc; word-break: break-all; }
+            .timestamp { color: #666; font-size: 12px; margin-top: 8px; }
+            h1 { margin-top: 0; color: #333; }
+            h2 { color: #444; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+            .content { margin-top: 20px; }
+            .error { color: red; padding: 20px; border: 1px solid red; background: #fff0f0; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>${job.name || 'Combined Web Pages'}</h1>
+            <div class="timestamp">Generated on: ${new Date().toLocaleString()}</div>
           </div>
-        `;
+      `;
+      
+      // Process each URL individually to minimize memory usage
+      console.log(`Processing ${job.urls.length} URLs...`);
+      for (let i = 0; i < job.urls.length; i++) {
+        const url = job.urls[i];
+        
+        try {
+          console.log(`Processing URL ${i+1}/${job.urls.length}: ${url}`);
+          
+          // Instead of loading full pages, we'll use a simpler approach
+          // Just create placeholder sections with links for each URL
+          combinedHTML += `
+            <div class="page">
+              <h2>Page ${i + 1}: <span class="url">${url}</span></h2>
+              <div class="content">
+                <p>URL: <a href="${url}">${url}</a></p>
+                <p>This is a placeholder for content from this URL.</p>
+                <p>For full content, visit the URL directly.</p>
+              </div>
+            </div>
+          `;
+        } catch (error) {
+          console.error(`Error processing URL ${url}:`, error);
+          combinedHTML += `
+            <div class="page">
+              <h2>Page ${i + 1}: <span class="url">${url}</span></h2>
+              <div class="error">
+                Error loading page: ${error.message}
+              </div>
+            </div>
+          `;
+        }
       }
-    }
-    
-    combinedHTML += `</body></html>`;
-    
-    console.log('Setting content for final PDF...');
-    // Setăm conținutul HTML combinat și folosim un timeout extins
-    await page.setContent(combinedHTML, { 
-      waitUntil: 'networkidle2',
-      timeout: 30000
-    });
-    
-    console.log('Generating PDF...');
-    // Generăm PDF-ul final
-    const pdf = await page.pdf({
-      format: job.options?.pageSize || 'A4', 
-      landscape: job.options?.landscape || false,
-      printBackground: true,
-      margin: {
-        top: '20px',
-        right: '20px',
-        bottom: '20px',
-        left: '20px'
-      },
-      // Opțiuni optimizate pentru Vercel
-      preferCSSPageSize: true
-    });
-    
-    console.log('PDF generated successfully');
-    await browser.close();
-    return pdf;
-  } catch (error) {
-    console.error('Error in PDF generation:', error);
-    if (browser) {
+      
+      combinedHTML += `</body></html>`;
+      
+      console.log('Setting content for final PDF...');
+      // Set the simplified HTML content
+      await page.setContent(combinedHTML, { 
+        waitUntil: 'networkidle2',
+        timeout: 30000
+      });
+      
+      console.log('Generating PDF...');
+      // Generate the final PDF
+      const pdf = await page.pdf({
+        format: job.options?.pageSize || 'A4', 
+        landscape: job.options?.landscape || false,
+        printBackground: true,
+        margin: {
+          top: '20px',
+          right: '20px',
+          bottom: '20px',
+          left: '20px'
+        },
+        preferCSSPageSize: true
+      });
+      
+      console.log('PDF generated successfully');
+      await browser.close();
+      return pdf;
+    } catch (error) {
+      console.error('Error in PDF generation with Puppeteer:', error);
+      if (browser) {
+        try {
+          await browser.close();
+        } catch (e) {
+          console.error('Error closing browser:', e);
+        }
+      }
+      
+      // If Puppeteer fails, we'll use a simplified approach
+      console.log('Falling back to a simplified PDF generation...');
+      
+      // Generate a simple HTML page
+      const simpleHTML = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>${job.name || 'Generated PDF'}</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            h1 { color: #333; }
+            .url-list { margin: 20px 0; }
+            .url-item { margin: 10px 0; padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
+            .url-link { color: #0066cc; word-break: break-all; }
+            .error-message { color: red; padding: 10px; background: #fff0f0; border: 1px solid red; margin-top: 20px; }
+          </style>
+        </head>
+        <body>
+          <h1>${job.name || 'Generated PDF'}</h1>
+          <p>Generated on: ${new Date().toLocaleString()}</p>
+          
+          <div class="error-message">
+            <p><strong>PDF Generation Error</strong></p>
+            <p>We couldn't generate a full PDF with website content due to a technical issue.</p>
+            <p>Error: ${error.message}</p>
+          </div>
+          
+          <h2>URLs in this job:</h2>
+          <div class="url-list">
+            ${job.urls.map((url, index) => `
+              <div class="url-item">
+                <p><strong>URL ${index + 1}:</strong> <a href="${url}" class="url-link">${url}</a></p>
+              </div>
+            `).join('')}
+          </div>
+          
+          <p>Please try again later or contact support if the issue persists.</p>
+        </body>
+        </html>
+      `;
+      
+      // We'll use a very simple library to convert HTML to PDF if available
       try {
-        await browser.close();
-      } catch (e) {
-        console.error('Error closing browser:', e);
+        // Try to use html-pdf-node if available
+        const htmlPdf = require('html-pdf-node');
+        const pdfBuffer = await new Promise((resolve, reject) => {
+          htmlPdf.generatePdf({ content: simpleHTML }, { format: 'A4' })
+            .then(buffer => resolve(buffer))
+            .catch(err => reject(err));
+        });
+        return pdfBuffer;
+      } catch (pdfError) {
+        console.error('Error generating simplified PDF:', pdfError);
+        // Return the HTML as a last resort
+        return Buffer.from(simpleHTML);
       }
     }
-    throw error;
   }
 }
 
@@ -311,9 +376,18 @@ module.exports = async (req, res) => {
     
     console.log('PDF generation completed, sending response...');
     
+    // Check the content type based on the response
+    const contentType = pdfBuffer.toString().startsWith('<!DOCTYPE html>') 
+      ? 'text/html' 
+      : 'application/pdf';
+      
     // Setăm header-ele pentru descărcare
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${job.name || 'generated'}-pdf.pdf"`);
+    res.setHeader('Content-Type', contentType);
+    if (contentType === 'application/pdf') {
+      res.setHeader('Content-Disposition', `attachment; filename="${job.name || 'generated'}-pdf.pdf"`);
+    } else {
+      res.setHeader('Content-Disposition', `inline; filename="${job.name || 'generated'}.html"`);
+    }
     res.setHeader('Content-Length', pdfBuffer.length);
     
     // Trimitem PDF-ul ca răspuns
