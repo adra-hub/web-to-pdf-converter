@@ -13,7 +13,7 @@ async function connectToDatabase() {
     useUnifiedTopology: true,
   });
 
-  const db = client.db('pdf-converter');
+  const db = client.db('Cluster0');
   cachedDb = db;
   return db;
 }
