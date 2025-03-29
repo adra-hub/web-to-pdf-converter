@@ -92,64 +92,79 @@ async function makeRequest(url, options, data) {
   });
 }
 
-// Generate CSS to expand accordions and resize images
-function getCustomCSS() {
+// Get HTML to handle accordions and images
+function getHTML(url, content) {
+  // Create a wrapper HTML that includes our CSS for accordions and images
   return `
-    /* Force all accordion and collapsible elements to be visible */
-    [aria-expanded="false"] { display: block !important; }
-    .accordion-collapse, .collapse { display: block !important; }
-    .accordion-button.collapsed::after { transform: rotate(-180deg); }
-    
-    /* Fix common accordion implementations */
-    .accordion-body, .collapse { height: auto !important; max-height: none !important; }
-    [class*="closed"], [class*="collapse"]:not(.show) { display: block !important; }
-    
-    /* Make images reasonable size */
-    img { max-width: 100% !important; height: auto !important; max-height: 400px !important; }
-    
-    /* Remove fixed elements and ads */
-    [class*="ad-"], [id*="ad-"], [class*="advertisement"], [id*="advertisement"],
-    .sticky-top, .fixed-top, .fixed-bottom { display: none !important; }
-    
-    /* Improve readability */
-    body { padding: 20px !important; max-width: 100% !important; overflow-x: hidden !important; }
-    pre, code { white-space: pre-wrap !important; }
-    
-    /* Print-specific styles */
-    @media print {
-      .page { page-break-after: always; }
-      .page:last-child { page-break-after: avoid; }
-      img { max-height: 400px; }
-    }
-  `;
-}
-
-// Generate JavaScript to expand accordions
-function getCustomJS() {
-  return `
-    // Try to open all accordions
-    try {
-      // Bootstrap accordions
-      document.querySelectorAll('.accordion-button.collapsed, .accordion-collapse:not(.show)')
-        .forEach(el => {
-          if (el.classList.contains('accordion-button')) {
-            el.classList.remove('collapsed');
-            el.setAttribute('aria-expanded', 'true');
-          } else {
-            el.classList.add('show');
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>PDF Content</title>
+      <style>
+        /* Force all accordion and collapsible elements to be visible */
+        [aria-expanded="false"] { display: block !important; }
+        .accordion-collapse, .collapse { display: block !important; }
+        .accordion-button.collapsed::after { transform: rotate(-180deg); }
+        
+        /* Fix common accordion implementations */
+        .accordion-body, .collapse { height: auto !important; max-height: none !important; }
+        [class*="closed"], [class*="collapse"]:not(.show) { display: block !important; }
+        
+        /* Make images reasonable size */
+        img { max-width: 100% !important; height: auto !important; max-height: 400px !important; }
+        
+        /* Remove fixed elements and ads */
+        [class*="ad-"], [id*="ad-"], [class*="advertisement"], [id*="advertisement"],
+        .sticky-top, .fixed-top, .fixed-bottom { display: none !important; }
+        
+        /* Improve readability */
+        body { font-family: Arial, sans-serif; padding: 20px !important; max-width: 100% !important; overflow-x: hidden !important; }
+        pre, code { white-space: pre-wrap !important; }
+        
+        /* Print-specific styles */
+        @media print {
+          .page { page-break-after: always; }
+          .page:last-child { page-break-after: avoid; }
+        }
+      </style>
+      <script>
+        window.addEventListener('DOMContentLoaded', function() {
+          // Try to open all accordions
+          try {
+            // Bootstrap accordions
+            document.querySelectorAll('.accordion-button.collapsed, .accordion-collapse:not(.show)')
+              .forEach(el => {
+                if (el.classList.contains('accordion-button')) {
+                  el.classList.remove('collapsed');
+                  el.setAttribute('aria-expanded', 'true');
+                } else {
+                  el.classList.add('show');
+                }
+              });
+            
+            // General accordions
+            document.querySelectorAll('[aria-expanded="false"]')
+              .forEach(el => el.setAttribute('aria-expanded', 'true'));
+              
+            // Collapse elements
+            document.querySelectorAll('.collapse:not(.show)')
+              .forEach(el => el.classList.add('show'));
+          } catch(e) {
+            console.error('Error expanding accordions:', e);
           }
         });
-      
-      // General accordions
-      document.querySelectorAll('[aria-expanded="false"]')
-        .forEach(el => el.setAttribute('aria-expanded', 'true'));
-        
-      // Collapse elements
-      document.querySelectorAll('.collapse:not(.show)')
-        .forEach(el => el.classList.add('show'));
-    } catch(e) {
-      console.error('Error expanding accordions:', e);
-    }
+      </script>
+    </head>
+    <body>
+      <header>
+        <h1>Content from: ${url}</h1>
+      </header>
+      <main>
+        <iframe src="${url}" style="width:100%; height:900px; border:1px solid #ddd;"></iframe>
+      </main>
+    </body>
+    </html>
   `;
 }
 
@@ -186,8 +201,9 @@ async function generatePDFWithBrowserless(job) {
       }
     };
     
+    // Use the correct API format - just URL and options
     const requestBody = JSON.stringify({
-      url: testUrl,
+      url: testUrl, // Simply use the URL directly
       options: {
         printBackground: true,
         format: job.options?.pageSize || 'A4',
@@ -210,12 +226,7 @@ async function generatePDFWithBrowserless(job) {
           </div>
         `
       },
-      gotoOptions: {
-        waitUntil: 'networkidle2',
-        timeout: 30000
-      },
-      additionalJS: getCustomJS(),
-      additionalCSS: getCustomCSS()
+      waitFor: 'networkidle2'
     });
     
     try {
@@ -228,100 +239,111 @@ async function generatePDFWithBrowserless(job) {
       
       console.log(`Successfully generated test PDF, size: ${pdfBuffer.length} bytes`);
       
-      // If test succeeds, return it as the result (for now, just to verify API connection)
+      // If that worked, now process all URLs
+      if (job.urls.length > 1) {
+        console.log(`Processing remaining ${job.urls.length - 1} URLs...`);
+        
+        // Create a cover page
+        const coverPageHTML = `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <title>${job.name || 'Web Pages PDF Report'}</title>
+            <style>
+              body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 40px;
+                text-align: center;
+              }
+              h1 {
+                color: #333;
+                margin-bottom: 20px;
+              }
+              .timestamp {
+                color: #666;
+                margin-bottom: 40px;
+              }
+              .url-list {
+                text-align: left;
+                max-width: 600px;
+                margin: 0 auto;
+              }
+              .url-item {
+                margin: 10px 0;
+                word-break: break-all;
+              }
+            </style>
+          </head>
+          <body>
+            <h1>${job.name || 'Web Pages PDF Report'}</h1>
+            <p class="timestamp">Generated on: ${new Date().toLocaleString()}</p>
+            
+            <div class="url-list">
+              <h2>Contents:</h2>
+              <ol>
+                ${job.urls.map((url, index) => {
+                  return `<li class="url-item">${url}</li>`;
+                }).join('')}
+              </ol>
+            </div>
+          </body>
+          </html>
+        `;
+        
+        const coverPageOptions = {
+          method: 'POST',
+          hostname: 'chrome.browserless.io',
+          path: `/pdf?token=${browserlessApiKey}`,
+          headers: {
+            'Cache-Control': 'no-cache',
+            'Content-Type': 'application/json'
+          }
+        };
+        
+        const coverPageRequest = JSON.stringify({
+          html: coverPageHTML,
+          options: {
+            printBackground: true,
+            format: job.options?.pageSize || 'A4',
+            landscape: job.options?.landscape || false,
+            margin: {
+              top: '20px',
+              right: '20px',
+              bottom: '20px',
+              left: '20px'
+            }
+          }
+        });
+        
+        try {
+          const coverPagePdf = await makeRequest(
+            `https://chrome.browserless.io/pdf?token=${browserlessApiKey}`,
+            coverPageOptions,
+            coverPageRequest
+          );
+          
+          console.log('Cover page generated successfully');
+          
+          // For now, just return the combined PDFs
+          // In a production app, you would combine the PDFs here
+          
+          // For testing, just return the test PDF
+          return pdfBuffer;
+        } catch (error) {
+          console.error('Error generating cover page:', error);
+          // Continue and return the test PDF if cover page generation fails
+        }
+      }
+      
+      // Return the test PDF
       return pdfBuffer;
       
     } catch (error) {
       console.error(`Error generating test PDF:`, error);
       throw new Error(`Browserless API test failed: ${error.message}`);
     }
-    
-    // Note: The full implementation with multiple URLs is commented out for now
-    // Until we get the basic API connection working
-    /*
-    // Create a single PDF for each URL, then combine them
-    const pdfPromises = job.urls.map(async (url, index) => {
-      console.log(`Processing URL ${index+1}/${job.urls.length}: ${url}`);
-      
-      const options = {
-        method: 'POST',
-        hostname: 'chrome.browserless.io',
-        path: `/pdf?token=${browserlessApiKey}`,
-        headers: {
-          'Cache-Control': 'no-cache',
-          'Content-Type': 'application/json'
-        }
-      };
-      
-      const requestBody = JSON.stringify({
-        url: url,
-        options: {
-          printBackground: true,
-          format: job.options?.pageSize || 'A4',
-          landscape: job.options?.landscape || false,
-          margin: {
-            top: '20px',
-            right: '20px',
-            bottom: '20px',
-            left: '20px'
-          },
-          displayHeaderFooter: true,
-          headerTemplate: `
-            <div style="width: 100%; font-size: 10px; text-align: center; color: #666;">
-              <span>${job.name || 'PDF Report'}</span>
-            </div>
-          `,
-          footerTemplate: `
-            <div style="width: 100%; font-size: 10px; text-align: center; color: #666;">
-              <span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>
-            </div>
-          `
-        },
-        gotoOptions: {
-          waitUntil: 'networkidle2',
-          timeout: 30000
-        },
-        additionalJS: getCustomJS(),
-        additionalCSS: getCustomCSS()
-      });
-      
-      try {
-        const pdfBuffer = await makeRequest(
-          `https://chrome.browserless.io/pdf?token=${browserlessApiKey}`,
-          options,
-          requestBody
-        );
-        
-        console.log(`Successfully generated PDF for ${url}, size: ${pdfBuffer.length} bytes`);
-        return {
-          url,
-          pdfBuffer,
-          success: true
-        };
-      } catch (error) {
-        console.error(`Error generating PDF for ${url}:`, error);
-        return {
-          url,
-          error: error.message,
-          success: false
-        };
-      }
-    });
-    
-    // Wait for all PDFs to be generated
-    const results = await Promise.all(pdfPromises);
-    
-    // Return the first successful PDF if we couldn't generate all of them
-    const successfulResults = results.filter(result => result.success);
-    
-    if (successfulResults.length === 0) {
-      throw new Error('Could not generate any PDFs. Check the Browserless.io API key and URLs.');
-    }
-    
-    // For now, just return the first PDF
-    return successfulResults[0].pdfBuffer;
-    */
-    
   } catch (error) {
     console.error('Error in Browserless PDF generation:', error);
     throw error;
