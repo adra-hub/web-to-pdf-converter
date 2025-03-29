@@ -104,10 +104,11 @@
             localStorage.setItem('pdfJobs', JSON.stringify(jobs));
         }
         
-        // Generate shareable link
-        function getShareableLink(jobId) {
-            return `${window.location.origin}/api/generate-pdf?id=${jobId}`;
-        }
+       // Generate shareable link
+function getShareableLink(jobId, urls) {
+    const urlsParam = encodeURIComponent(urls.join(','));
+    return `${window.location.origin}/api/generate-pdf?id=${jobId}&urls=${urlsParam}`;
+}
         
         // Create a new job
         function createJob(name, urls) {
