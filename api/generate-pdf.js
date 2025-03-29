@@ -24,21 +24,29 @@ async function getUserFromRequest(req) {
 
 // Funcție pentru generarea PDF-ului
 async function generatePDF(job) {
-  const puppeteer = require('puppeteer-extra');
-  const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-  puppeteer.use(StealthPlugin());
-  
-  // Pentru Vercel, folosim chrome-aws-lambda
+  // Pentru Vercel, folosim chrome-aws-lambda și puppeteer-core
+  // fără plugin-ul stealth care cauzează probleme
   const chromium = require('chrome-aws-lambda');
+  const puppeteer = require('puppeteer-core');
   
-  const browser = await puppeteer.launch({
-    args: [...chromium.args, '--disable-features=site-per-process'],
-    defaultViewport: chromium.defaultViewport,
-    executablePath: await chromium.executablePath,
-    headless: true,
-  });
-
+  let browser;
   try {
+    console.log('Launching browser...');
+    browser = await puppeteer.launch({
+      args: [
+        ...chromium.args,
+        '--disable-features=site-per-process',
+        '--disable-dev-shm-usage',
+        '--disable-setuid-sandbox',
+        '--no-sandbox'
+      ],
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath,
+      headless: true,
+    });
+
+    console.log('Browser launched successfully');
+
     // Creăm o pagină nouă
     const page = await browser.newPage();
     
@@ -82,10 +90,12 @@ async function generatePDF(job) {
       const url = job.urls[i];
       
       try {
-        // Navigăm la URL
+        console.log(`Processing URL ${i+1}/${job.urls.length}: ${url}`);
+        
+        // Navigăm la URL cu un timeout mai mare
         await page.goto(url, { 
-          waitUntil: 'networkidle0', 
-          timeout: 30000 
+          waitUntil: 'networkidle2', // Schimbat la networkidle2 pentru a fi mai permisiv
+          timeout: 45000  // 45 seconds to accommodate slower sites
         });
         
         // Executăm script pentru a expanda elementele de tip acordeon
@@ -95,12 +105,12 @@ async function generatePDF(job) {
             
             // Bootstrap accordions
             document.querySelectorAll('.accordion-button.collapsed').forEach(button => {
-              button.click();
+              try { button.click(); } catch (e) {}
             });
             
             // Generic accordions by attribute
             document.querySelectorAll('[aria-expanded="false"]').forEach(elem => {
-              elem.click();
+              try { elem.click(); } catch (e) {}
             });
             
             // Generic accordions by class
@@ -108,7 +118,7 @@ async function generatePDF(job) {
               document.querySelectorAll(`.${className}`).forEach(acc => {
                 if (acc.classList.contains('collapsed') || acc.classList.contains('closed') || 
                     !acc.classList.contains('active') || !acc.classList.contains('show')) {
-                  acc.click();
+                  try { acc.click(); } catch (e) {}
                 }
               });
             });
@@ -125,7 +135,7 @@ async function generatePDF(job) {
         const pageContent = await page.evaluate(() => {
           // Curățăm conținutul de elemente nedorite
           document.querySelectorAll('script, style, iframe[src*="ads"], div[id*="ad-"], div[class*="ad-"]')
-            .forEach(el => el.remove());
+            .forEach(el => { try { el.remove(); } catch (e) {} });
           
           // Returnăm conținutul body
           return document.documentElement.outerHTML;
@@ -141,6 +151,7 @@ async function generatePDF(job) {
           </div>
         `;
       } catch (error) {
+        console.error(`Error processing URL ${url}:`, error);
         // În caz de eroare, adăugăm un mesaj de eroare
         combinedHTML += `
           <div class="page">
@@ -155,9 +166,11 @@ async function generatePDF(job) {
     
     combinedHTML += `</body></html>`;
     
+    console.log('Setting content for final PDF...');
     // Setăm conținutul HTML combinat
-    await page.setContent(combinedHTML, { waitUntil: 'networkidle0' });
+    await page.setContent(combinedHTML, { waitUntil: 'networkidle2' });
     
+    console.log('Generating PDF...');
     // Generăm PDF-ul final
     const pdf = await page.pdf({
       format: job.options?.pageSize || 'A4', 
@@ -171,16 +184,22 @@ async function generatePDF(job) {
       }
     });
     
+    console.log('PDF generated successfully');
     await browser.close();
     return pdf;
   } catch (error) {
-    await browser.close();
+    console.error('Error in PDF generation:', error);
+    if (browser) {
+      await browser.close();
+    }
     throw error;
   }
 }
 
 // Handler-ul principal pentru cereri
 module.exports = async (req, res) => {
+  console.log('PDF generation request received');
+  
   // Verificăm metoda HTTP
   if (req.method !== 'GET') {
     return res.status(405).send('Method Not Allowed');
@@ -194,6 +213,8 @@ module.exports = async (req, res) => {
     if (!jobId) {
       return res.status(400).send('Missing job ID');
     }
+    
+    console.log(`Fetching job with ID: ${jobId}`);
     
     // Conectare la baza de date
     const db = await connectToDatabase();
@@ -215,12 +236,15 @@ module.exports = async (req, res) => {
       return res.status(404).send('Job not found');
     }
     
+    console.log(`Job found: ${job.name}, URLs: ${job.urls.length}`);
+    
     // Verificăm dacă job-ul aparține utilizatorului actual (sau e public)
     if (job.userId && user && job.userId !== user.sub && !job.isPublic) {
       return res.status(403).send('Unauthorized access to this job');
     }
     
     // Generăm PDF-ul
+    console.log('Starting PDF generation...');
     const pdfBuffer = await generatePDF(job);
     
     // Actualizăm timestamp-ul ultimei generări
@@ -229,13 +253,15 @@ module.exports = async (req, res) => {
       { $set: { lastGenerated: new Date() } }
     );
     
+    console.log('PDF generation completed, sending response...');
+    
     // Setăm header-ele pentru descărcare
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${job.name || 'generated'}-pdf.pdf"`);
     res.setHeader('Content-Length', pdfBuffer.length);
     
     // Trimitem PDF-ul ca răspuns
-    res.send(pdfBuffer);
+    res.status(200).send(pdfBuffer);
     
   } catch (error) {
     console.error('PDF generation error:', error);
