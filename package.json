@@ -1,0 +1,12 @@
+{
+  "name": "web-to-pdf-converter",
+  "version": "1.0.0",
+  "description": "Application to convert web pages to PDF in bulk",
+  "scripts": {
+    "start": "vercel dev"
+  },
+  "dependencies": {
+    "chrome-aws-lambda": "^10.1.0",
+    "puppeteer-core": "^10.1.0"
+  }
+}
