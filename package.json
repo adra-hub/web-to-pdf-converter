@@ -13,8 +13,7 @@
     "jsonwebtoken": "^9.0.0",
     "mongodb": "^4.13.0",
     "puppeteer-core": "^10.1.0",
-    "puppeteer-extra": "^3.3.4",
-    "puppeteer-extra-plugin-stealth": "^2.11.1"
+    "pdf-lib": "^1.17.1"
   },
   "engines": {
     "node": ">=14.0.0"
