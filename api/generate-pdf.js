@@ -4,6 +4,8 @@ const cookie = require('cookie');
 const jwt = require('jsonwebtoken');
 const { ObjectId } = require('mongodb');
 const fs = require('fs');
+const https = require('https');
+const http = require('http');
 
 // Funcție pentru verificarea autentificării
 async function getUserFromRequest(req) {
@@ -23,16 +25,120 @@ async function getUserFromRequest(req) {
   }
 }
 
-// Generate a minimal PDF using a very basic approach
-async function generateMinimalPDF(job) {
-  console.log('Using minimal PDF generation approach...');
+// Function to fetch content from a URL
+async function fetchUrlContent(url) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http;
+    
+    const req = client.get(url, (res) => {
+      if (res.statusCode !== 200) {
+        return reject(new Error(`Failed to fetch ${url}, status: ${res.statusCode}`));
+      }
+      
+      let data = '';
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        resolve(data);
+      });
+    });
+    
+    req.on('error', (err) => {
+      reject(err);
+    });
+    
+    // Set timeout
+    req.setTimeout(15000, () => {
+      req.abort();
+      reject(new Error(`Request timeout for ${url}`));
+    });
+  });
+}
+
+// Function to extract minimal content from HTML
+function extractMinimalContent(html, url) {
+  try {
+    // Extract title
+    const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/i);
+    const title = titleMatch ? titleMatch[1] : url;
+    
+    // Extract text content (simplified approach)
+    let content = html
+      // Remove scripts, styles, and comments
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+      .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      // Extract text from paragraphs and headings
+      .match(/<(p|h1|h2|h3|h4|h5|h6)[^>]*>(.*?)<\/(p|h1|h2|h3|h4|h5|h6)>/gi) || [];
+    
+    content = content.map(tag => {
+      // Convert tag to plain text
+      return tag
+        .replace(/<[^>]+>/g, '') // Remove HTML tags
+        .replace(/&nbsp;/g, ' ')  // Convert &nbsp; to spaces
+        .replace(/&lt;/g, '<')    // Convert &lt; to <
+        .replace(/&gt;/g, '>')    // Convert &gt; to >
+        .replace(/&amp;/g, '&')   // Convert &amp; to &
+        .replace(/&quot;/g, '"')  // Convert &quot; to "
+        .trim();                  // Trim whitespace
+    }).filter(text => text.length > 10); // Filter out short snippets
+    
+    // Limit to a reasonable number of paragraphs to save memory
+    const maxParagraphs = 15;
+    if (content.length > maxParagraphs) {
+      content = content.slice(0, maxParagraphs);
+      content.push("... (content truncated for PDF size)");
+    }
+    
+    return { title, content };
+  } catch (error) {
+    console.error(`Error extracting content from ${url}:`, error);
+    return { 
+      title: url, 
+      content: [`Error extracting content: ${error.message}`] 
+    };
+  }
+}
+
+// Generate PDF with real content
+async function generateEnhancedPDF(job) {
+  console.log('Using enhanced PDF generation with real content...');
   
   try {
+    // Fetch content from each URL
+    const pagesContent = [];
+    for (let i = 0; i < job.urls.length; i++) {
+      const url = job.urls[i];
+      console.log(`Fetching content for URL ${i+1}/${job.urls.length}: ${url}`);
+      
+      try {
+        const htmlContent = await fetchUrlContent(url);
+        const { title, content } = extractMinimalContent(htmlContent, url);
+        
+        pagesContent.push({
+          url,
+          title,
+          content
+        });
+        
+        console.log(`Successfully extracted content from ${url}, got ${content.length} paragraphs`);
+      } catch (error) {
+        console.error(`Error fetching content from ${url}:`, error);
+        pagesContent.push({
+          url,
+          title: url,
+          content: [`Error: ${error.message}`]
+        });
+      }
+    }
+    
     // Using puppeteer-core with minimal settings
     const puppeteer = require('puppeteer-core');
     const chromium = require('chrome-aws-lambda');
     
-    // Create very minimal HTML
+    // Create HTML with real content
     const html = `
       <!DOCTYPE html>
       <html>
@@ -41,21 +147,30 @@ async function generateMinimalPDF(job) {
         <title>${job.name || 'PDF Report'}</title>
         <style>
           body { font-family: sans-serif; margin: 40px; }
-          h1 { color: #333; }
-          p { margin: 10px 0; }
-          .urls { margin: 20px 0; }
+          h1 { color: #333; margin-bottom: 10px; }
+          h2 { color: #444; margin-top: 30px; margin-bottom: 10px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
+          h3 { color: #555; }
+          p { margin: 10px 0; line-height: 1.4; }
+          .page { page-break-after: always; }
+          .url { color: #0066cc; word-break: break-all; font-size: 14px; margin-bottom: 15px; }
+          .content { margin-top: 20px; }
+          .timestamp { color: #666; font-size: 14px; margin-top: 5px; margin-bottom: 20px; }
         </style>
       </head>
       <body>
-        <h1>${job.name || 'PDF Report'}</h1>
-        <p>Generated on: ${new Date().toLocaleString()}</p>
+        <h1>${job.name || 'Web Pages PDF Report'}</h1>
+        <p class="timestamp">Generated on: ${new Date().toLocaleString()}</p>
         
-        <div class="urls">
-          <h2>URLs:</h2>
-          <ul>
-            ${job.urls.map(url => `<li>${url}</li>`).join('')}
-          </ul>
-        </div>
+        ${pagesContent.map((page, index) => `
+          <div class="page">
+            <h2>${index + 1}. ${page.title}</h2>
+            <div class="url">Source: ${page.url}</div>
+            
+            <div class="content">
+              ${page.content.map(paragraph => `<p>${paragraph}</p>`).join('')}
+            </div>
+          </div>
+        `).join('')}
       </body>
       </html>
     `;
@@ -86,7 +201,8 @@ async function generateMinimalPDF(job) {
     
     console.log('Generating PDF...');
     const pdf = await page.pdf({
-      format: 'A4',
+      format: job.options?.pageSize || 'A4',
+      landscape: job.options?.landscape || false,
       printBackground: true,
       margin: {
         top: '20px',
@@ -104,14 +220,14 @@ async function generateMinimalPDF(job) {
     
     return pdf;
   } catch (error) {
-    console.error('Error in minimal PDF generation:', error);
+    console.error('Error in enhanced PDF generation:', error);
     
     // Fallback to a static PDF if everything else fails
     try {
-      console.log('Using static PDF as final fallback');
+      console.log('Using static PDF as fallback');
       
       // Create a simple static PDF in memory
-      const { PDFDocument, rgb } = require('pdf-lib');
+      const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
       
       // Create a new PDF document
       const pdfDoc = await PDFDocument.create();
@@ -122,11 +238,16 @@ async function generateMinimalPDF(job) {
       // Get the width and height of the page
       const { width, height } = page.getSize();
       
-      // Draw text on the page
-      page.drawText(`${job.name || 'PDF Report'}`, {
+      // Add fonts
+      const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+      
+      // Draw title
+      page.drawText(`${job.name || 'Web Pages PDF Report'}`, {
         x: 50,
         y: height - 50,
         size: 24,
+        font: boldFont,
         color: rgb(0, 0, 0),
       });
       
@@ -134,27 +255,81 @@ async function generateMinimalPDF(job) {
         x: 50,
         y: height - 80,
         size: 12,
-        color: rgb(0, 0, 0),
+        font: font,
+        color: rgb(0.4, 0.4, 0.4),
       });
       
-      page.drawText('URLs:', {
-        x: 50,
-        y: height - 120,
-        size: 14,
-        color: rgb(0, 0, 0),
-      });
+      // Add each URL with some content
+      let yPosition = height - 120;
+      const lineHeight = 15;
       
-      // Add each URL
-      let yPosition = height - 150;
-      job.urls.forEach((url, index) => {
-        page.drawText(`${index + 1}. ${url}`, {
+      for (let i = 0; i < job.urls.length; i++) {
+        const url = job.urls[i];
+        
+        // Add new page if we're running out of space
+        if (yPosition < 100) {
+          const newPage = pdfDoc.addPage([595.28, 841.89]);
+          yPosition = height - 50;
+        }
+        
+        // URL title
+        page.drawText(`${i + 1}. ${url}`, {
           x: 50,
           y: yPosition,
-          size: 10,
+          size: 14,
+          font: boldFont,
           color: rgb(0, 0, 0),
         });
-        yPosition -= 20;
-      });
+        yPosition -= lineHeight * 1.5;
+        
+        // Try to fetch minimal content
+        try {
+          const htmlContent = await fetchUrlContent(url);
+          const { title, content } = extractMinimalContent(htmlContent, url);
+          
+          // Draw title
+          page.drawText(title, {
+            x: 70,
+            y: yPosition,
+            size: 12,
+            font: boldFont,
+            color: rgb(0, 0, 0),
+          });
+          yPosition -= lineHeight * 1.2;
+          
+          // Draw first 3 paragraphs at most
+          const maxParagraphs = Math.min(3, content.length);
+          for (let j = 0; j < maxParagraphs; j++) {
+            // If text is too long, truncate it
+            let text = content[j];
+            if (text.length > 100) {
+              text = text.substring(0, 97) + '...';
+            }
+            
+            page.drawText(text, {
+              x: 70,
+              y: yPosition,
+              size: 10,
+              font: font,
+              color: rgb(0, 0, 0),
+            });
+            yPosition -= lineHeight;
+          }
+          
+          // Add space between URLs
+          yPosition -= lineHeight;
+          
+        } catch (error) {
+          page.drawText(`Error fetching content: ${error.message}`, {
+            x: 70,
+            y: yPosition,
+            size: 10,
+            font: font,
+            color: rgb(0.8, 0, 0),
+          });
+          yPosition -= lineHeight * 2;
+        }
+      }
       
       // Serialize the PDF to bytes
       const pdfBytes = await pdfDoc.save();
@@ -225,8 +400,8 @@ module.exports = async (req, res) => {
     }
     
     // Generate the PDF
-    console.log('Starting simplified PDF generation...');
-    const pdfBuffer = await generateMinimalPDF(job);
+    console.log('Starting enhanced PDF generation...');
+    const pdfBuffer = await generateEnhancedPDF(job);
     
     // Update last generated timestamp
     await jobsCollection.updateOne(
