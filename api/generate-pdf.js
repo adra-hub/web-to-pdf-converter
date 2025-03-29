@@ -6,6 +6,7 @@ const { ObjectId } = require('mongodb');
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
+const path = require('path');
 
 // Funcție pentru verificarea autentificării
 async function getUserFromRequest(req) {
@@ -30,7 +31,16 @@ async function fetchUrlContent(url) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http;
     
-    const req = client.get(url, (res) => {
+    const options = new URL(url);
+    options.headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache'
+    };
+    
+    const req = client.get(options, (res) => {
       if (res.statusCode !== 200) {
         return reject(new Error(`Failed to fetch ${url}, status: ${res.statusCode}`));
       }
@@ -57,127 +67,214 @@ async function fetchUrlContent(url) {
   });
 }
 
-// Function to extract minimal content from HTML
-function extractMinimalContent(html, url) {
+// Process HTML to expand accordions and resize images
+function processHtml(html, url) {
   try {
-    // Extract title
-    const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/i);
-    const title = titleMatch ? titleMatch[1] : url;
+    // Extract base URL for fixing relative URLs
+    const baseUrl = new URL(url);
+    const domain = `${baseUrl.protocol}//${baseUrl.hostname}`;
     
-    // Extract text content (simplified approach)
-    let content = html
-      // Remove scripts, styles, and comments
-      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-      .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
-      .replace(/<!--[\s\S]*?-->/g, '')
-      // Extract text from paragraphs and headings
-      .match(/<(p|h1|h2|h3|h4|h5|h6)[^>]*>(.*?)<\/(p|h1|h2|h3|h4|h5|h6)>/gi) || [];
+    // Process image tags - make them smaller and fix relative URLs
+    html = html.replace(/<img[^>]*src=["']([^"']+)["'][^>]*>/gi, (match, src) => {
+      // Fix relative URLs
+      let fullSrc = src;
+      if (src.startsWith('/')) {
+        fullSrc = `${domain}${src}`;
+      } else if (!src.startsWith('http')) {
+        fullSrc = `${domain}/${src}`;
+      }
+      
+      // Add style to make images smaller
+      return match.replace(/<img/i, '<img style="max-width: 100%; height: auto; max-height: 400px;"');
+    });
     
-    content = content.map(tag => {
-      // Convert tag to plain text
-      return tag
-        .replace(/<[^>]+>/g, '') // Remove HTML tags
-        .replace(/&nbsp;/g, ' ')  // Convert &nbsp; to spaces
-        .replace(/&lt;/g, '<')    // Convert &lt; to <
-        .replace(/&gt;/g, '>')    // Convert &gt; to >
-        .replace(/&amp;/g, '&')   // Convert &amp; to &
-        .replace(/&quot;/g, '"')  // Convert &quot; to "
-        .trim();                  // Trim whitespace
-    }).filter(text => text.length > 10); // Filter out short snippets
+    // Fix relative URLs in links
+    html = html.replace(/<a[^>]*href=["']([^"']+)["'][^>]*>/gi, (match, href) => {
+      if (href.startsWith('/')) {
+        return match.replace(href, `${domain}${href}`);
+      } else if (!href.startsWith('http') && !href.startsWith('#') && !href.startsWith('mailto:')) {
+        return match.replace(href, `${domain}/${href}`);
+      }
+      return match;
+    });
     
-    // Limit to a reasonable number of paragraphs to save memory
-    const maxParagraphs = 15;
-    if (content.length > maxParagraphs) {
-      content = content.slice(0, maxParagraphs);
-      content.push("... (content truncated for PDF size)");
+    // Add CSS to expand accordions
+    const expansionCss = `
+      <style>
+        /* Force all accordion and collapsible elements to be visible */
+        [aria-expanded="false"] { display: block !important; }
+        .accordion-collapse, .collapse { display: block !important; }
+        .accordion-button.collapsed::after { transform: rotate(-180deg); }
+        
+        /* Fix common accordion implementations */
+        .accordion-body, .collapse { height: auto !important; max-height: none !important; }
+        [class*="closed"], [class*="collapse"]:not(.show) { display: block !important; }
+        
+        /* Make images reasonable size */
+        img { max-width: 100% !important; height: auto !important; max-height: 400px !important; }
+        
+        /* Remove fixed elements and ads */
+        [class*="ad-"], [id*="ad-"], [class*="advertisement"], [id*="advertisement"],
+        .sticky-top, .fixed-top, .fixed-bottom { display: none !important; }
+        
+        /* Improve readability */
+        body { padding: 20px !important; max-width: 100% !important; }
+        pre, code { white-space: pre-wrap !important; }
+      </style>
+    `;
+    
+    // Add stylesheet to the head
+    if (html.includes('<head>')) {
+      html = html.replace('<head>', `<head>${expansionCss}`);
+    } else if (html.includes('<html>')) {
+      html = html.replace('<html>', `<html><head>${expansionCss}</head>`);
+    } else {
+      html = `<html><head>${expansionCss}</head><body>${html}</body></html>`;
     }
     
-    return { title, content };
+    // Add JavaScript to try to expand accordions when the page loads
+    const expansionScript = `
+      <script>
+        document.addEventListener('DOMContentLoaded', function() {
+          // Try to open all accordions
+          try {
+            // Bootstrap accordions
+            document.querySelectorAll('.accordion-button.collapsed, .accordion-collapse:not(.show)')
+              .forEach(el => {
+                if (el.classList.contains('accordion-button')) {
+                  el.classList.remove('collapsed');
+                  el.setAttribute('aria-expanded', 'true');
+                } else {
+                  el.classList.add('show');
+                }
+              });
+            
+            // General accordions
+            document.querySelectorAll('[aria-expanded="false"]')
+              .forEach(el => el.setAttribute('aria-expanded', 'true'));
+              
+            // Collapse elements
+            document.querySelectorAll('.collapse:not(.show)')
+              .forEach(el => el.classList.add('show'));
+          } catch(e) {
+            console.error('Error expanding accordions:', e);
+          }
+        });
+      </script>
+    `;
+    
+    // Add the script just before the closing body tag
+    if (html.includes('</body>')) {
+      html = html.replace('</body>', `${expansionScript}</body>`);
+    } else {
+      html = `${html}${expansionScript}`;
+    }
+    
+    return html;
   } catch (error) {
-    console.error(`Error extracting content from ${url}:`, error);
-    return { 
-      title: url, 
-      content: [`Error extracting content: ${error.message}`] 
-    };
+    console.error('Error processing HTML:', error);
+    return html; // Return original HTML if processing fails
   }
 }
 
-// Generate PDF with real content
-async function generateEnhancedPDF(job) {
-  console.log('Using enhanced PDF generation with real content...');
+// Generate PDF with puppeteer using a full-content approach
+async function generateFullContentPDF(job) {
+  console.log('Using full content PDF generation approach...');
   
   try {
-    // Fetch content from each URL
-    const pagesContent = [];
-    for (let i = 0; i < job.urls.length; i++) {
-      const url = job.urls[i];
-      console.log(`Fetching content for URL ${i+1}/${job.urls.length}: ${url}`);
-      
-      try {
-        const htmlContent = await fetchUrlContent(url);
-        const { title, content } = extractMinimalContent(htmlContent, url);
-        
-        pagesContent.push({
-          url,
-          title,
-          content
-        });
-        
-        console.log(`Successfully extracted content from ${url}, got ${content.length} paragraphs`);
-      } catch (error) {
-        console.error(`Error fetching content from ${url}:`, error);
-        pagesContent.push({
-          url,
-          title: url,
-          content: [`Error: ${error.message}`]
-        });
-      }
-    }
-    
-    // Using puppeteer-core with minimal settings
-    const puppeteer = require('puppeteer-core');
-    const chromium = require('chrome-aws-lambda');
-    
-    // Create HTML with real content
-    const html = `
+    // Create combined HTML with all pages
+    let combinedHTML = `
       <!DOCTYPE html>
       <html>
       <head>
         <meta charset="UTF-8">
-        <title>${job.name || 'PDF Report'}</title>
+        <title>${job.name || 'Web Pages PDF Report'}</title>
         <style>
-          body { font-family: sans-serif; margin: 40px; }
-          h1 { color: #333; margin-bottom: 10px; }
-          h2 { color: #444; margin-top: 30px; margin-bottom: 10px; border-bottom: 1px solid #ddd; padding-bottom: 5px; }
-          h3 { color: #555; }
-          p { margin: 10px 0; line-height: 1.4; }
-          .page { page-break-after: always; }
-          .url { color: #0066cc; word-break: break-all; font-size: 14px; margin-bottom: 15px; }
-          .content { margin-top: 20px; }
-          .timestamp { color: #666; font-size: 14px; margin-top: 5px; margin-bottom: 20px; }
+          body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 0; padding: 20px; }
+          .cover-page { page-break-after: always; padding: 100px 20px; text-align: center; }
+          .page { page-break-after: always; padding: 20px 0; }
+          .page:last-child { page-break-after: avoid; }
+          .page-header { background: #f0f0f0; padding: 15px; margin-bottom: 20px; border-bottom: 1px solid #ddd; }
+          .url { color: #0066cc; word-break: break-all; }
+          .timestamp { color: #666; font-size: 14px; margin-top: 8px; }
+          h1 { margin-top: 0; color: #333; }
+          h2 { color: #444; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+          iframe { width: 100%; height: 800px; border: 1px solid #ddd; }
+          img { max-width: 100%; height: auto; max-height: 400px; }
+          
+          /* Print-specific styles */
+          @media print {
+            .page { page-break-after: always; }
+            .page:last-child { page-break-after: avoid; }
+            img { max-height: 400px; }
+          }
         </style>
       </head>
       <body>
-        <h1>${job.name || 'Web Pages PDF Report'}</h1>
-        <p class="timestamp">Generated on: ${new Date().toLocaleString()}</p>
-        
-        ${pagesContent.map((page, index) => `
-          <div class="page">
-            <h2>${index + 1}. ${page.title}</h2>
-            <div class="url">Source: ${page.url}</div>
-            
-            <div class="content">
-              ${page.content.map(paragraph => `<p>${paragraph}</p>`).join('')}
-            </div>
-          </div>
-        `).join('')}
-      </body>
-      </html>
+        <div class="cover-page">
+          <h1>${job.name || 'Web Pages PDF Report'}</h1>
+          <p class="timestamp">Generated on: ${new Date().toLocaleString()}</p>
+          <p>This report contains content from the following URLs:</p>
+          <ul style="text-align: left; display: inline-block;">
+            ${job.urls.map(url => `<li>${url}</li>`).join('')}
+          </ul>
+        </div>
     `;
     
-    console.log('Launching browser...');
+    // Process each URL and embed the content
+    for (let i = 0; i < job.urls.length; i++) {
+      const url = job.urls[i];
+      console.log(`Processing URL ${i+1}/${job.urls.length}: ${url}`);
+      
+      try {
+        // Fetch the HTML content
+        let htmlContent = await fetchUrlContent(url);
+        
+        // Process the HTML to expand accordions and resize images
+        htmlContent = processHtml(htmlContent, url);
+        
+        // Create a clean page HTML with iframe to isolate content
+        combinedHTML += `
+          <div class="page">
+            <div class="page-header">
+              <h2>Page ${i + 1}</h2>
+              <div class="url">${url}</div>
+            </div>
+            
+            <div class="page-content">
+              ${htmlContent}
+            </div>
+          </div>
+        `;
+        
+        console.log(`Successfully processed content from ${url}`);
+      } catch (error) {
+        console.error(`Error processing ${url}:`, error);
+        combinedHTML += `
+          <div class="page">
+            <div class="page-header">
+              <h2>Page ${i + 1}</h2>
+              <div class="url">${url}</div>
+            </div>
+            
+            <div class="page-content">
+              <div style="padding: 20px; border: 1px solid red; background: #fff0f0;">
+                <h3>Error loading content</h3>
+                <p>${error.message}</p>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+    }
     
-    // Launch with minimal options
+    combinedHTML += `</body></html>`;
+    
+    // Launch puppeteer to generate PDF
+    console.log('Launching browser...');
+    const puppeteer = require('puppeteer-core');
+    const chromium = require('chrome-aws-lambda');
+    
     const browser = await puppeteer.launch({
       args: [
         '--no-sandbox',
@@ -196,8 +293,23 @@ async function generateEnhancedPDF(job) {
     console.log('Browser launched, creating page...');
     const page = await browser.newPage();
     
+    // Configure the viewport
+    await page.setViewport({
+      width: job.options?.pageWidth || 1200,
+      height: job.options?.pageHeight || 1600
+    });
+    
+    // Set a reasonable timeout
+    page.setDefaultNavigationTimeout(30000);
+    
     console.log('Setting content...');
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    await page.setContent(combinedHTML, { 
+      waitUntil: 'networkidle0',
+      timeout: 30000
+    });
+
+    // Wait a bit to ensure all content is rendered
+    await page.waitForTimeout(2000);
     
     console.log('Generating PDF...');
     const pdf = await page.pdf({
@@ -209,7 +321,8 @@ async function generateEnhancedPDF(job) {
         right: '20px',
         bottom: '20px',
         left: '20px'
-      }
+      },
+      preferCSSPageSize: true
     });
     
     console.log(`PDF generated, size: ${pdf.length} bytes`);
@@ -220,30 +333,101 @@ async function generateEnhancedPDF(job) {
     
     return pdf;
   } catch (error) {
-    console.error('Error in enhanced PDF generation:', error);
+    console.error('Error in full content PDF generation:', error);
     
-    // Fallback to a static PDF if everything else fails
+    // Fall back to simpler approach if full content approach fails
     try {
-      console.log('Using static PDF as fallback');
+      console.log('Falling back to simpler PDF generation...');
       
-      // Create a simple static PDF in memory
+      // Try using puppeteer with a simpler approach - just listing URLs and brief content
+      const puppeteer = require('puppeteer-core');
+      const chromium = require('chrome-aws-lambda');
+      
+      const browser = await puppeteer.launch({
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--no-first-run',
+          '--single-process',
+          '--disable-gpu'
+        ],
+        executablePath: await chromium.executablePath,
+        headless: true
+      });
+      
+      const page = await browser.newPage();
+      
+      // Create a simple HTML with just URLs and basic info
+      const simpleHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <title>${job.name || 'PDF Report'}</title>
+          <style>
+            body { font-family: sans-serif; margin: 40px; }
+            h1 { color: #333; }
+            p { margin: 10px 0; }
+            .urls { margin: 20px 0; }
+            .url-item { margin: 15px 0; padding: 10px; border: 1px solid #ddd; }
+            .error-message { color: red; padding: 20px; background: #fff0f0; margin-top: 20px; }
+          </style>
+        </head>
+        <body>
+          <h1>${job.name || 'PDF Report'}</h1>
+          <p>Generated on: ${new Date().toLocaleString()}</p>
+          
+          <div class="error-message">
+            <p><strong>Note:</strong> Full content rendering failed. This is a simplified version.</p>
+            <p>Error: ${error.message}</p>
+          </div>
+          
+          <div class="urls">
+            <h2>URLs in this job:</h2>
+            ${job.urls.map((url, index) => `
+              <div class="url-item">
+                <h3>Page ${index + 1}</h3>
+                <p><a href="${url}">${url}</a></p>
+              </div>
+            `).join('')}
+          </div>
+        </body>
+        </html>
+      `;
+      
+      await page.setContent(simpleHtml, { waitUntil: 'networkidle0' });
+      
+      const pdf = await page.pdf({
+        format: job.options?.pageSize || 'A4',
+        landscape: job.options?.landscape || false,
+        printBackground: true,
+        margin: {
+          top: '20px',
+          right: '20px',
+          bottom: '20px',
+          left: '20px'
+        }
+      });
+      
+      await browser.close();
+      return pdf;
+    } catch (fallbackError) {
+      console.error('Error in fallback PDF generation:', fallbackError);
+      
+      // As a last resort, use pdf-lib to create a simple PDF
       const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
       
-      // Create a new PDF document
       const pdfDoc = await PDFDocument.create();
-      
-      // Add a page to the document
       const page = pdfDoc.addPage([595.28, 841.89]); // A4 size
-      
-      // Get the width and height of the page
       const { width, height } = page.getSize();
       
       // Add fonts
       const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
       const boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
       
-      // Draw title
-      page.drawText(`${job.name || 'Web Pages PDF Report'}`, {
+      // Add content
+      page.drawText(`${job.name || 'PDF Report'}`, {
         x: 50,
         y: height - 50,
         size: 24,
@@ -259,95 +443,44 @@ async function generateEnhancedPDF(job) {
         color: rgb(0.4, 0.4, 0.4),
       });
       
-      // Add each URL with some content
-      let yPosition = height - 120;
-      const lineHeight = 15;
+      page.drawText('Error generating full content PDF:', {
+        x: 50,
+        y: height - 120,
+        size: 12,
+        font: boldFont,
+        color: rgb(0.8, 0, 0),
+      });
       
-      for (let i = 0; i < job.urls.length; i++) {
-        const url = job.urls[i];
-        
-        // Add new page if we're running out of space
-        if (yPosition < 100) {
-          const newPage = pdfDoc.addPage([595.28, 841.89]);
-          yPosition = height - 50;
-        }
-        
-        // URL title
-        page.drawText(`${i + 1}. ${url}`, {
+      page.drawText(error.message, {
+        x: 50,
+        y: height - 140,
+        size: 10,
+        font: font,
+        color: rgb(0.8, 0, 0),
+      });
+      
+      page.drawText('URLs in this job:', {
+        x: 50,
+        y: height - 180,
+        size: 14,
+        font: boldFont,
+        color: rgb(0, 0, 0),
+      });
+      
+      let yPosition = height - 210;
+      job.urls.forEach((url, index) => {
+        page.drawText(`${index + 1}. ${url}`, {
           x: 50,
           y: yPosition,
-          size: 14,
-          font: boldFont,
+          size: 10,
+          font: font,
           color: rgb(0, 0, 0),
         });
-        yPosition -= lineHeight * 1.5;
-        
-        // Try to fetch minimal content
-        try {
-          const htmlContent = await fetchUrlContent(url);
-          const { title, content } = extractMinimalContent(htmlContent, url);
-          
-          // Draw title
-          page.drawText(title, {
-            x: 70,
-            y: yPosition,
-            size: 12,
-            font: boldFont,
-            color: rgb(0, 0, 0),
-          });
-          yPosition -= lineHeight * 1.2;
-          
-          // Draw first 3 paragraphs at most
-          const maxParagraphs = Math.min(3, content.length);
-          for (let j = 0; j < maxParagraphs; j++) {
-            // If text is too long, truncate it
-            let text = content[j];
-            if (text.length > 100) {
-              text = text.substring(0, 97) + '...';
-            }
-            
-            page.drawText(text, {
-              x: 70,
-              y: yPosition,
-              size: 10,
-              font: font,
-              color: rgb(0, 0, 0),
-            });
-            yPosition -= lineHeight;
-          }
-          
-          // Add space between URLs
-          yPosition -= lineHeight;
-          
-        } catch (error) {
-          page.drawText(`Error fetching content: ${error.message}`, {
-            x: 70,
-            y: yPosition,
-            size: 10,
-            font: font,
-            color: rgb(0.8, 0, 0),
-          });
-          yPosition -= lineHeight * 2;
-        }
-      }
+        yPosition -= 20;
+      });
       
-      // Serialize the PDF to bytes
       const pdfBytes = await pdfDoc.save();
-      
       return Buffer.from(pdfBytes);
-    } catch (pdfLibError) {
-      console.error('Error in static PDF fallback:', pdfLibError);
-      
-      // As a last resort, return a simple text document
-      const text = `
-        ${job.name || 'PDF Report'}
-        Generated on: ${new Date().toLocaleString()}
-        
-        URLs:
-        ${job.urls.map((url, index) => `${index + 1}. ${url}`).join('\n')}
-      `;
-      
-      return Buffer.from(text);
     }
   }
 }
@@ -400,8 +533,8 @@ module.exports = async (req, res) => {
     }
     
     // Generate the PDF
-    console.log('Starting enhanced PDF generation...');
-    const pdfBuffer = await generateEnhancedPDF(job);
+    console.log('Starting full content PDF generation...');
+    const pdfBuffer = await generateFullContentPDF(job);
     
     // Update last generated timestamp
     await jobsCollection.updateOne(
