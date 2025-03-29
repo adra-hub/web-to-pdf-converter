@@ -23,23 +23,59 @@ async function getUserFromRequest(req) {
   }
 }
 
-// Funcție pentru a face cereri HTTP
+// Funcție pentru a face cereri HTTP cu logging extins
 async function makeRequest(url, options, data) {
+  console.log(`Making request to: ${url}`);
+  console.log(`Request method: ${options.method}`);
+  console.log(`Request headers:`, options.headers);
+  
+  // Log a truncated version of the data for debugging
+  if (data) {
+    const dataStr = data.toString();
+    console.log(`Request data (truncated): ${dataStr.substring(0, 200)}... (${dataStr.length} bytes total)`);
+  }
+  
   return new Promise((resolve, reject) => {
     const req = https.request(url, options, (res) => {
+      console.log(`Response status code: ${res.statusCode}`);
+      console.log(`Response headers:`, res.headers);
+      
       const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
+      let size = 0;
+      
+      res.on('data', (chunk) => {
+        chunks.push(chunk);
+        size += chunk.length;
+        console.log(`Received chunk of ${chunk.length} bytes, total so far: ${size} bytes`);
+      });
+      
       res.on('end', () => {
         const body = Buffer.concat(chunks);
+        console.log(`Request complete, total size: ${body.length} bytes`);
+        
         if (res.statusCode >= 200 && res.statusCode < 300) {
           resolve(body);
         } else {
-          reject(new Error(`HTTP request failed with status ${res.statusCode}: ${body.toString()}`));
+          let errorBody = "";
+          try {
+            errorBody = body.toString('utf8');
+            // If it looks like JSON, try to parse it
+            if (errorBody.startsWith('{') || errorBody.startsWith('[')) {
+              const jsonError = JSON.parse(errorBody);
+              errorBody = JSON.stringify(jsonError, null, 2);
+            }
+          } catch (e) {
+            errorBody = `[Could not parse error body: ${e.message}]`;
+          }
+          
+          console.error(`Request failed with status ${res.statusCode}. Error body:`, errorBody);
+          reject(new Error(`HTTP request failed with status ${res.statusCode}: ${errorBody}`));
         }
       });
     });
 
     req.on('error', (error) => {
+      console.error(`Request error:`, error);
       reject(error);
     });
 
@@ -47,6 +83,12 @@ async function makeRequest(url, options, data) {
       req.write(data);
     }
     req.end();
+    
+    // Add a timeout
+    req.setTimeout(60000, () => {
+      console.error('Request timed out after 60 seconds');
+      req.destroy(new Error('Request timeout after 60 seconds'));
+    });
   });
 }
 
@@ -119,9 +161,84 @@ async function generatePDFWithBrowserless(job) {
     // Check for API key
     const browserlessApiKey = process.env.BROWSERLESS_API_KEY;
     if (!browserlessApiKey) {
+      console.error('Browserless API key is not configured');
       throw new Error('Browserless API key is not configured. Please set BROWSERLESS_API_KEY in your environment variables.');
     }
     
+    // Log first few characters of API key for verification (security-safe)
+    const keyLength = browserlessApiKey.length;
+    const maskedKey = browserlessApiKey.substring(0, 4) + 
+                     '*'.repeat(Math.max(0, keyLength - 8)) + 
+                     (keyLength > 4 ? browserlessApiKey.substring(keyLength - 4) : '');
+    console.log(`Using Browserless API key: ${maskedKey} (length: ${keyLength})`);
+    
+    // Try a single URL first as a test
+    const testUrl = job.urls[0];
+    console.log(`Testing Browserless with first URL: ${testUrl}`);
+    
+    const options = {
+      method: 'POST',
+      hostname: 'chrome.browserless.io',
+      path: `/pdf?token=${browserlessApiKey}`,
+      headers: {
+        'Cache-Control': 'no-cache',
+        'Content-Type': 'application/json'
+      }
+    };
+    
+    const requestBody = JSON.stringify({
+      url: testUrl,
+      options: {
+        printBackground: true,
+        format: job.options?.pageSize || 'A4',
+        landscape: job.options?.landscape || false,
+        margin: {
+          top: '20px',
+          right: '20px',
+          bottom: '20px',
+          left: '20px'
+        },
+        displayHeaderFooter: true,
+        headerTemplate: `
+          <div style="width: 100%; font-size: 10px; text-align: center; color: #666;">
+            <span>${job.name || 'PDF Report'}</span>
+          </div>
+        `,
+        footerTemplate: `
+          <div style="width: 100%; font-size: 10px; text-align: center; color: #666;">
+            <span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span>
+          </div>
+        `
+      },
+      gotoOptions: {
+        waitUntil: 'networkidle2',
+        timeout: 30000
+      },
+      additionalJS: getCustomJS(),
+      additionalCSS: getCustomCSS()
+    });
+    
+    try {
+      console.log('Sending test request to Browserless.io...');
+      const pdfBuffer = await makeRequest(
+        `https://chrome.browserless.io/pdf?token=${browserlessApiKey}`,
+        options,
+        requestBody
+      );
+      
+      console.log(`Successfully generated test PDF, size: ${pdfBuffer.length} bytes`);
+      
+      // If test succeeds, return it as the result (for now, just to verify API connection)
+      return pdfBuffer;
+      
+    } catch (error) {
+      console.error(`Error generating test PDF:`, error);
+      throw new Error(`Browserless API test failed: ${error.message}`);
+    }
+    
+    // Note: The full implementation with multiple URLs is commented out for now
+    // Until we get the basic API connection working
+    /*
     // Create a single PDF for each URL, then combine them
     const pdfPromises = job.urls.map(async (url, index) => {
       console.log(`Processing URL ${index+1}/${job.urls.length}: ${url}`);
@@ -194,93 +311,6 @@ async function generatePDFWithBrowserless(job) {
     // Wait for all PDFs to be generated
     const results = await Promise.all(pdfPromises);
     
-    // Create a cover page
-    const coverPageOptions = {
-      method: 'POST',
-      hostname: 'chrome.browserless.io',
-      path: `/pdf?token=${browserlessApiKey}`,
-      headers: {
-        'Cache-Control': 'no-cache',
-        'Content-Type': 'application/json'
-      }
-    };
-    
-    // HTML for the cover page
-    const coverPageHTML = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <title>${job.name || 'Web Pages PDF Report'}</title>
-        <style>
-          body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 40px;
-            text-align: center;
-          }
-          h1 {
-            color: #333;
-            margin-bottom: 20px;
-          }
-          .timestamp {
-            color: #666;
-            margin-bottom: 40px;
-          }
-          .url-list {
-            text-align: left;
-            max-width: 600px;
-            margin: 0 auto;
-          }
-          .url-item {
-            margin: 10px 0;
-            word-break: break-all;
-          }
-        </style>
-      </head>
-      <body>
-        <h1>${job.name || 'Web Pages PDF Report'}</h1>
-        <p class="timestamp">Generated on: ${new Date().toLocaleString()}</p>
-        
-        <div class="url-list">
-          <h2>Contents:</h2>
-          <ol>
-            ${job.urls.map((url, index) => {
-              const result = results[index];
-              return `<li class="url-item">
-                ${url}
-                ${!result.success ? `<br><span style="color: red;">(Error: ${result.error})</span>` : ''}
-              </li>`;
-            }).join('')}
-          </ol>
-        </div>
-      </body>
-      </html>
-    `;
-    
-    const coverPageRequest = JSON.stringify({
-      html: coverPageHTML,
-      options: {
-        printBackground: true,
-        format: job.options?.pageSize || 'A4',
-        landscape: job.options?.landscape || false,
-        margin: {
-          top: '20px',
-          right: '20px',
-          bottom: '20px',
-          left: '20px'
-        }
-      }
-    });
-    
-    const coverPagePdf = await makeRequest(
-      `https://chrome.browserless.io/pdf?token=${browserlessApiKey}`,
-      coverPageOptions,
-      coverPageRequest
-    );
-    
-    console.log('Cover page generated successfully');
-    
     // Return the first successful PDF if we couldn't generate all of them
     const successfulResults = results.filter(result => result.success);
     
@@ -288,30 +318,9 @@ async function generatePDFWithBrowserless(job) {
       throw new Error('Could not generate any PDFs. Check the Browserless.io API key and URLs.');
     }
     
-    if (successfulResults.length < results.length) {
-      console.warn(`Warning: Only ${successfulResults.length} out of ${results.length} PDFs were generated successfully.`);
-    }
-    
-    // If we at least have the cover page, return that
-    if (successfulResults.length === 0 && coverPagePdf) {
-      return coverPagePdf;
-    }
-    
-    // If we only have one page, return it directly
-    if (successfulResults.length === 1 && !coverPagePdf) {
-      return successfulResults[0].pdfBuffer;
-    }
-    
-    // Combine the PDFs
-    console.log('Combining PDFs...');
-    
-    // First, combine the PDFs using PDF-lib or another library
-    // For this example, we'll just return the first PDF with a note
-    // In a production app, you would use a PDF combination library here
-    
-    // For now, we'll just return the first PDF
-    // In the future, this could be enhanced with a proper PDF combination library
-    return coverPagePdf || successfulResults[0].pdfBuffer;
+    // For now, just return the first PDF
+    return successfulResults[0].pdfBuffer;
+    */
     
   } catch (error) {
     console.error('Error in Browserless PDF generation:', error);
@@ -322,6 +331,22 @@ async function generatePDFWithBrowserless(job) {
 // Handler-ul principal pentru cereri
 module.exports = async (req, res) => {
   console.log('PDF generation request received');
+  
+  // Log all environment variables (with secret values masked)
+  console.log('Environment variables:');
+  Object.keys(process.env).forEach(key => {
+    const value = process.env[key];
+    if (key.toLowerCase().includes('key') || key.toLowerCase().includes('secret') || key.toLowerCase().includes('password')) {
+      // Mask secrets
+      const maskedValue = value ? 
+        value.substring(0, 3) + '***' + (value.length > 6 ? value.substring(value.length - 3) : '') : 
+        'null';
+      console.log(`${key}: ${maskedValue} (length: ${value ? value.length : 0})`);
+    } else {
+      // Safe to log non-secret values
+      console.log(`${key}: ${value && value.length > 100 ? value.substring(0, 100) + '...' : value}`);
+    }
+  });
   
   // Verificăm metoda HTTP
   if (req.method !== 'GET') {
@@ -360,6 +385,7 @@ module.exports = async (req, res) => {
     }
     
     console.log(`Job found: ${job.name}, URLs: ${job.urls.length}`);
+    console.log(`First URL in job: ${job.urls[0]}`);
     
     // Verificăm dacă job-ul aparține utilizatorului actual (sau e public)
     if (job.userId && user && job.userId !== user.sub && !job.isPublic) {
@@ -384,6 +410,7 @@ module.exports = async (req, res) => {
     
     if (!isPdf) {
       console.warn('Warning: Generated content does not appear to be a valid PDF');
+      console.log('First 100 bytes of response:', pdfBuffer.toString('ascii', 0, 100));
     }
     
     // Setăm header-ele pentru descărcare
