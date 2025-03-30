@@ -387,27 +387,48 @@
         }
         
         // Delete a job
-        async function deleteJob(jobId) {
-            if (!confirm('Are you sure you want to delete this job? This cannot be undone.')) {
-                return;
-            }
-            
-            try {
-                const response = await fetch(`/api/jobs/${jobId}`, {
-                    method: 'DELETE'
-                });
-                
-                if (!response.ok) {
-                    throw new Error('Failed to delete job');
-                }
-                
-                showNotification('Job deleted successfully');
-                loadJobs();
-            } catch (error) {
-                console.error('Error deleting job:', error);
-                showNotification('Failed to delete job', 'danger');
-            }
+async function deleteJob(jobId) {
+    if (!confirm('Are you sure you want to delete this job? This cannot be undone.')) {
+        return;
+    }
+    
+    try {
+        // Adaugă un log pentru debugging
+        console.log('Deleting job with ID:', jobId);
+        
+        const response = await fetch(`/api/jobs/${jobId}`, {
+            method: 'DELETE',
+            headers: {
+                // Asigură-te că toate headerele necesare sunt incluse
+                'Content-Type': 'application/json',
+                // Dacă API-ul folosește autentificare bazată pe token, includeți-l aici
+                // 'Authorization': `Bearer ${yourToken}`
+            },
+            // Pentru a ne asigura că cookies de autentificare sunt trimise
+            credentials: 'include'
+        });
+        
+        // Verifică mai detaliat răspunsul
+        console.log('Delete response status:', response.status);
+        
+        if (!response.ok) {
+            // Încearcă să obții mai multe detalii despre eroare
+            const errorText = await response.text();
+            console.error('Server error response:', errorText);
+            throw new Error(`Failed to delete job: ${response.status} ${errorText}`);
         }
+        
+        showNotification('Job deleted successfully');
+        loadJobs();
+    } catch (error) {
+        console.error('Error deleting job:', error);
+        showNotification('Failed to delete job: ' + error.message, 'danger');
+        
+        // Reîncărcăm oricum lista de job-uri pentru a actualiza interfața
+        // în caz că ștergerea a funcționat dar a fost o eroare de comunicare
+        loadJobs();
+    }
+}
         
         // Toggle public/private status
         async function togglePublic(jobId, makePublic) {
