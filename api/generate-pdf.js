@@ -2,8 +2,6 @@ const { parse } = require('url');
 const { connectToDatabase } = require('./db');
 const { ObjectId } = require('mongodb');
 
-// În locul generării directe a PDF-ului pe Vercel
-// Facem o redirecționare către serviciul nostru de pe Render
 module.exports = async (req, res) => {
   try {
     const { query } = parse(req.url, true);
@@ -22,7 +20,6 @@ module.exports = async (req, res) => {
     try {
       job = await jobsCollection.findOne({ _id: new ObjectId(jobId) });
     } catch (e) {
-      // Dacă ID-ul nu este un ObjectId valid, încercăm ca string
       job = await jobsCollection.findOne({ _id: jobId });
     }
     
@@ -38,9 +35,11 @@ module.exports = async (req, res) => {
       { $set: { lastGenerated: new Date() } }
     ).catch(err => console.error('Error updating timestamp:', err));
     
-    // Construim URL-ul către serviciul de pe Render
-    // Înlocuiește "numele-tau-serviciu" cu numele real al serviciului tău Render
-    const renderServiceUrl = `https://pdf-generator-service.onrender.com/generate-pdf?urls=${encodeURIComponent(job.urls.join(','))}&name=${encodeURIComponent(job.name || 'PDF Report')}&pageSize=${job.options?.pageSize || 'A4'}&landscape=${job.options?.landscape === true ? 'true' : 'false'}`;
+    // Construim URL-ul către serviciul Render cu secțiunile de eliminat
+    const sectionsToRemoveParam = job.options?.sectionsToRemove ? 
+      `&sectionsToRemove=${encodeURIComponent(job.options.sectionsToRemove.join(','))}` : '';
+    
+    const renderServiceUrl = `https://numele-tau-serviciu.onrender.com/generate-pdf?urls=${encodeURIComponent(job.urls.join(','))}&name=${encodeURIComponent(job.name || 'PDF Report')}&pageSize=${job.options?.pageSize || 'A4'}&landscape=${job.options?.landscape === true ? 'true' : 'false'}${sectionsToRemoveParam}`;
     
     console.log(`Redirecting to Render service: ${renderServiceUrl}`);
     
