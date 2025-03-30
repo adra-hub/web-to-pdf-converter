@@ -125,6 +125,20 @@
                                                 <label class="form-check-label" for="isPublic">Make PDF Publicly Accessible</label>
                                             </div>
                                         </div>
+                                        <!-- Noua secțiune pentru eliminarea elementelor -->
+                                        <div class="col-12 mt-3">
+                                            <label for="sectionsToRemove" class="form-label">Sections to Remove (CSS selectors, comma separated)</label>
+                                            <textarea class="form-control" id="sectionsToRemove" rows="2" placeholder="#header, .ads-section, div.sidebar"></textarea>
+                                            <div class="form-text">
+                                                Enter CSS selectors for elements you want to remove from the PDF. Examples:
+                                                <ul class="mt-1 small">
+                                                    <li><code>#header</code> - removes element with ID "header"</li>
+                                                    <li><code>.ads-section</code> - removes elements with class "ads-section"</li>
+                                                    <li><code>div.sidebar</code> - removes div elements with class "sidebar"</li>
+                                                    <li><code>section[id="specific-id"]</code> - removes section with specific ID</li>
+                                                </ul>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                                 
@@ -156,6 +170,7 @@
                                 <li class="list-group-item">✅ Convert multiple web pages to a single PDF</li>
                                 <li class="list-group-item">✅ Customize page size and orientation</li>
                                 <li class="list-group-item">✅ Automatically expand accordions and dropdown elements</li>
+                                <li class="list-group-item">✅ Remove unwanted sections from pages using CSS selectors</li>
                                 <li class="list-group-item">✅ Save and organize your PDF conversion jobs</li>
                                 <li class="list-group-item">✅ Generate up-to-date PDFs with shared links</li>
                             </ul>
@@ -312,6 +327,8 @@
                                         <li class="list-group-item">Page Size: ${job.options?.pageSize || 'A4'}</li>
                                         <li class="list-group-item">Orientation: ${job.options?.landscape ? 'Landscape' : 'Portrait'}</li>
                                         <li class="list-group-item">Expand Accordions: ${job.options?.expandAccordions ? 'Yes' : 'No'}</li>
+                                        <li class="list-group-item">Sections to Remove: ${job.options?.sectionsToRemove && job.options.sectionsToRemove.length > 0 ? 
+                                            job.options.sectionsToRemove.join(', ') : 'None'}</li>
                                     </ul>
                                 </div>
                             </div>
@@ -332,7 +349,7 @@
         }
         
         // Create a new job
-        async function createJob(name, urls, options) {
+        async function createJob(name, urls, options, isPublic) {
             try {
                 const response = await fetch('/api/jobs', {
                     method: 'POST',
@@ -342,7 +359,8 @@
                     body: JSON.stringify({
                         name,
                         urls,
-                        options
+                        options,
+                        isPublic
                     })
                 });
                 
@@ -358,6 +376,7 @@
                 // Reset form
                 document.getElementById('jobName').value = '';
                 document.getElementById('urls').value = '';
+                document.getElementById('sectionsToRemove').value = '';
                 
                 return job;
             } catch (error) {
@@ -432,6 +451,7 @@
             const orientationSelect = document.getElementById('orientation');
             const expandAccordionsCheckbox = document.getElementById('expandAccordions');
             const isPublicCheckbox = document.getElementById('isPublic');
+            const sectionsToRemoveInput = document.getElementById('sectionsToRemove');
             
             const submitBtn = document.getElementById('submitBtn');
             const originalBtnText = submitBtn.textContent;
@@ -455,13 +475,20 @@
                     return;
                 }
                 
+                // Procesăm secțiunile de eliminat
+                const sectionsToRemove = sectionsToRemoveInput.value
+                    .split(',')
+                    .map(selector => selector.trim())
+                    .filter(selector => selector);
+                
                 // Construim opțiunile
                 const options = {
                     pageSize: pageSizeSelect.value,
                     landscape: orientationSelect.value === 'landscape',
                     expandAccordions: expandAccordionsCheckbox.checked,
                     pageWidth: 1200,
-                    pageHeight: 1600
+                    pageHeight: 1600,
+                    sectionsToRemove: sectionsToRemove
                 };
                 
                 // Creăm job-ul
@@ -470,6 +497,7 @@
                 // Reset form
                 nameInput.value = '';
                 urlsInput.value = '';
+                sectionsToRemoveInput.value = '';
                 
             } catch (error) {
                 console.error('Error in form submission:', error);
