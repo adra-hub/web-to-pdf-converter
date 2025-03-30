@@ -20,6 +20,7 @@ module.exports = async (req, res) => {
     try {
       job = await jobsCollection.findOne({ _id: new ObjectId(jobId) });
     } catch (e) {
+      // Dacă ID-ul nu este un ObjectId valid, încercăm ca string
       job = await jobsCollection.findOne({ _id: jobId });
     }
     
@@ -36,10 +37,18 @@ module.exports = async (req, res) => {
     ).catch(err => console.error('Error updating timestamp:', err));
     
     // Construim URL-ul către serviciul Render cu secțiunile de eliminat
-    const sectionsToRemoveParam = job.options?.sectionsToRemove ? 
-      `&sectionsToRemove=${encodeURIComponent(job.options.sectionsToRemove.join(','))}` : '';
+    let sectionsToRemoveParam = '';
+    if (job.options?.sectionsToRemove && Array.isArray(job.options.sectionsToRemove) && job.options.sectionsToRemove.length > 0) {
+      sectionsToRemoveParam = `&sectionsToRemove=${encodeURIComponent(job.options.sectionsToRemove.join(','))}`;
+    }
     
-    const renderServiceUrl = `https://numele-tau-serviciu.onrender.com/generate-pdf?urls=${encodeURIComponent(job.urls.join(','))}&name=${encodeURIComponent(job.name || 'PDF Report')}&pageSize=${job.options?.pageSize || 'A4'}&landscape=${job.options?.landscape === true ? 'true' : 'false'}${sectionsToRemoveParam}`;
+    // Adăugăm parametri pentru pageSize și landscape
+    const pageSizeParam = job.options?.pageSize ? `&pageSize=${job.options.pageSize}` : '&pageSize=A4';
+    const landscapeParam = job.options?.landscape === true ? '&landscape=true' : '&landscape=false';
+    
+    // URL-ul complet către serviciul de pe Render
+    // Înlocuiește "numele-tau-serviciu" cu numele real al serviciului tău
+    const renderServiceUrl = `https://pdf-generator-service.onrender.com/generate-pdf?urls=${encodeURIComponent(job.urls.join(','))}&name=${encodeURIComponent(job.name || 'PDF Report')}${pageSizeParam}${landscapeParam}${sectionsToRemoveParam}`;
     
     console.log(`Redirecting to Render service: ${renderServiceUrl}`);
     
